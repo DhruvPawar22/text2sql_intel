@@ -1,19 +1,23 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from pydantic import BaseModel
 from dotenv import load_dotenv
-load_dotenv()
-import streamlit as st
 import os
 import sqlite3
 import google.generativeai as genai
 
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-st.set_page_config(page_title="I can Retrieve any SQL query")
+load_dotenv()
 
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+app = FastAPI()
+
+class QueryRequest(BaseModel):
+    question: str
 
 def get_gemini_response(question, prompt):
     model = genai.GenerativeModel('gemini-pro')
     response = model.generate_content([prompt, question])
     return response.text
-
 
 def read_sql_query(sql, db):
     try:
@@ -23,13 +27,9 @@ def read_sql_query(sql, db):
         rows = cur.fetchall()
         conn.commit()
         conn.close()
-        for row in rows:
-            print(row)
         return rows
     except sqlite3.Error as e:
-        print(f"An error occurred: {e}")
-        return []
-
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
 def get_db_schema(db):
     try:
@@ -44,9 +44,7 @@ def get_db_schema(db):
         conn.close()
         return schema_info
     except sqlite3.Error as e:
-        print(f"An error occurred while retrieving schema: {e}")
-        return {}
-
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
 def generate_prompt(schema_info):
     prompt = "You are an expert in converting English questions to SQL queries!\n"
@@ -65,31 +63,24 @@ def generate_prompt(schema_info):
     prompt += "Note: Ensure that the SQL code does not have ``` at the beginning or end and does not include the word 'sql'.\n"
     return prompt
 
+@app.post("/upload/")
+async def upload_db(file: UploadFile = File(...)):
+    file_location = f"uploaded_student.db"
+    with open(file_location, "wb+") as file_object:
+        file_object.write(file.file.read())
+    return {"info": "File uploaded successfully"}
 
-st.header("Gemini App to retrieve SQL data")
-
-uploaded_file = st.file_uploader("Upload your SQLite database file", type="db")
-question = st.text_input("Input: ", key="input")
-
-submit = st.button("Ask the question")
-
-if submit and uploaded_file is not None:
-    with open("uploaded_student.db", "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
+@app.post("/query/")
+async def query_database(request: QueryRequest):
     schema_info = get_db_schema("uploaded_student.db")
     if schema_info:
         prompt = generate_prompt(schema_info)
-        response = get_gemini_response(question, prompt)
-        print(f"Generated SQL query: {response}")
-
+        response = get_gemini_response(request.question, prompt)
         data = read_sql_query(response, "uploaded_student.db")
-        st.subheader("The response is")
-        if data:
-            for row in data:
-                print(row)
-                st.write(row)
-        else:
-            st.write("No data found or an error occurred.")
+        return {"data": data}
     else:
-        st.write("Failed to retrieve schema information from the uploaded database.")
+        raise HTTPException(status_code=500, detail="Failed to retrieve schema information")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
